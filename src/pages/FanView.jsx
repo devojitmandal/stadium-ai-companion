@@ -1,9 +1,7 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
-import { GoogleGenAI } from '@google/genai';
+import { askGemini } from '../lib/askGemini';
 import { Timer, Accessibility, Loader2, MapPin, ArrowRight } from 'lucide-react';
-
-const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
 
 export default function FanView() {
   const [gates, setGates] = useState([]);
@@ -54,13 +52,8 @@ export default function FanView() {
         }
       `;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: prompt,
-        config: { responseMimeType: 'application/json' }
-      });
-
-      setPrediction(JSON.parse(response.text));
+      const result = await askGemini(prompt);
+      setPrediction(result);
     } catch (error) {
       console.error("AI Error:", error);
       alert("Failed to predict. Check console.");

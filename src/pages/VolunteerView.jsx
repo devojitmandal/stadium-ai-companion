@@ -1,9 +1,6 @@
 import { useState } from 'react';
-import { GoogleGenAI } from '@google/genai';
+import { askGemini } from '../lib/askGemini';
 import { Globe2, AlertCircle, Loader2 } from 'lucide-react';
-
-// Initialize Gemini (Using the key from your .env.local)
-const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
 
 export default function VolunteerView() {
   const [language, setLanguage] = useState('Spanish');
@@ -30,16 +27,7 @@ export default function VolunteerView() {
         }
       `;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json', // Forces Gemini to return clean JSON
-        }
-      });
-
-      // Parse the JSON string Gemini returns into a JavaScript object
-      const data = JSON.parse(response.text);
+      const data = await askGemini(prompt);
       setResult(data);
     } catch (error) {
       console.error("Error generating phrases:", error);

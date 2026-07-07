@@ -1,9 +1,7 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
-import { GoogleGenAI } from '@google/genai';
+import { askGemini } from '../lib/askGemini';
 import { LayoutDashboard, TrendingUp, ShieldAlert, CheckCircle2, Loader2, Users } from 'lucide-react';
-
-const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
 
 export default function OrganizerView() {
   const [gates, setGates] = useState([]);
@@ -72,13 +70,8 @@ export default function OrganizerView() {
         }
       `;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: prompt,
-        config: { responseMimeType: 'application/json' }
-      });
-
-      setAnalysis(JSON.parse(response.text));
+      const result = await askGemini(prompt);
+      setAnalysis(result);
     } catch (error) {
       console.error("Analysis Error:", error);
       alert("Failed to analyze spike.");
