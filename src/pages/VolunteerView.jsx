@@ -1,12 +1,40 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { supabase } from '../lib/supabase';
 import { askGemini } from '../lib/askGemini';
-import { Globe2, AlertCircle, Loader2 } from 'lucide-react';
+import { Globe2, AlertCircle, Loader2, ShieldAlert, CheckCircle2 } from 'lucide-react';
 
 export default function VolunteerView() {
   const [language, setLanguage] = useState('Spanish');
   const [situation, setSituation] = useState('Lost Child');
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [incidents, setIncidents] = useState([]);
+const [errorMsg, setErrorMsg] = useState(null);
+
+const fetchIncidents = async () => {
+  const { data } = await supabase
+    .from('incidents')
+    .select('*')
+    .eq('status', 'open')
+    .order('created_at', { ascending: false });
+  if (data) setIncidents(data);
+};
+
+useEffect(() => {
+  fetchIncidents();
+  const interval = setInterval(fetchIncidents, 5000);
+  return () => clearInterval(interval);
+}, []);
+
+const resolveIncident = async (id) => {
+  const { error } = await supabase.from('incidents').update({ status: 'resolved' }).eq('id', id);
+  if (error) {
+    console.error("Resolve error:", error);
+    setErrorMsg("Couldn't resolve incident — try again.");
+    return;
+  }
+  fetchIncidents();
+};
 
   const generatePhrases = async () => {
     setLoading(true);
@@ -31,13 +59,41 @@ export default function VolunteerView() {
       setResult(data);
     } catch (error) {
       console.error("Error generating phrases:", error);
-      alert("Failed to generate phrases. Check your API key and console.");
+      setErrorMsg("Couldn't reach AI right now — try again.");
     }
     setLoading(false);
   };
 
   return (
     <div className="p-6 max-w-4xl mx-auto space-y-6">
+    {incidents.length > 0 && (
+  <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 space-y-3">
+    <h2 className="text-lg font-bold flex items-center gap-2">
+      <ShieldAlert className="text-red-500" />
+      Open Incidents
+    </h2>
+    {incidents.map((inc) => (
+      <div key={inc.id} className="flex items-center justify-between bg-red-50 border border-red-200 p-3 rounded-lg">
+        <div>
+          <p className="font-semibold text-red-900">{inc.type}</p>
+          <p className="text-sm text-red-700">{inc.location}</p>
+        </div>
+        <button
+          onClick={() => resolveIncident(inc.id)}
+          className="bg-white border border-red-300 text-red-700 px-3 py-1.5 rounded-lg text-sm font-medium hover:bg-red-100 flex items-center gap-1"
+        >
+          <CheckCircle2 size={14} /> Resolve
+        </button>
+      </div>
+    ))}
+  </div>
+)}
+
+{errorMsg && (
+  <div className="bg-amber-50 border border-amber-200 text-amber-800 p-3 rounded-lg text-sm">
+    {errorMsg}
+  </div>
+)}
       <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
         <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
           <Globe2 className="text-blue-600" />

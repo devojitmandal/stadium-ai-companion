@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import { askGemini } from '../lib/askGemini';
-import { Timer, Accessibility, Loader2, MapPin, ArrowRight } from 'lucide-react';
+import { Timer, Accessibility, Loader2, MapPin, ArrowRight, Leaf, Train } from 'lucide-react';
 
 export default function FanView() {
   const [gates, setGates] = useState([]);
@@ -10,6 +10,10 @@ export default function FanView() {
   const [needsAccessibility, setNeedsAccessibility] = useState(false);
   const [prediction, setPrediction] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [gateInfo, setGateInfo] = useState(null);
+const [loadingInfo, setLoadingInfo] = useState(false);
+const [predictionError, setPredictionError] = useState(null);
+const [gateInfoError, setGateInfoError] = useState(null);
 
   // 1. Fetch live stadium data from Supabase
   useEffect(() => {
@@ -56,13 +60,76 @@ export default function FanView() {
       setPrediction(result);
     } catch (error) {
       console.error("AI Error:", error);
-      alert("Failed to predict. Check console.");
+      setPredictionError("Couldn't reach AI right now — try again.");
     }
     setLoading(false);
   };
+  const getGateInfo = async () => {
+    setLoadingInfo(true);
+    const targetGate = gates.find(g => g.gate_id === selectedGate);
+  
+    try {
+      const prompt = `
+        You are a stadium fan assistant. Gate context: ${JSON.stringify(targetGate?.context || {})}
+  
+        Based on this, write:
+        1. A short, friendly sustainability tip (mention the nearest recycling point if available)
+        2. A short transportation status update (metro/parking) in plain language
+  
+        Return strict JSON:
+        { "sustainability_tip": "...", "transport_status": "..." }
+      `;
+      const result = await askGemini(prompt);
+      setGateInfo(result);
+    } catch (error) {
+      console.error("Gate info error:", error);
+      setGateInfoError("Couldn't load gate info — try again.");
+    }
+    setLoadingInfo(false);
+  };
+  const [notifications, setNotifications] = useState([]);
+const [notificationError, setNotificationError] = useState(null);
+
+useEffect(() => {
+  const fetchNotifications = async () => {
+    const { data } = await supabase
+      .from('notifications')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(3);
+    if (data) setNotifications(data);
+  };
+  fetchNotifications();
+  const interval = setInterval(fetchNotifications, 5000);
+  return () => clearInterval(interval);
+}, []);
+useEffect(() => {
+  if (selectedGate && gates.length > 0) getGateInfo();
+}, [selectedGate, gates]);
 
   return (
     <div className="p-6 max-w-4xl mx-auto space-y-6">
+      {notifications.map((n) => (
+  <div key={n.id} className="bg-amber-50 border border-amber-300 text-amber-900 p-3 rounded-lg text-sm mb-3">
+    ⚠️ {n.message}
+  </div>
+))}
+
+{predictionError && (
+  <div className="bg-amber-50 border border-amber-200 text-amber-800 p-3 rounded-lg text-sm mb-3">
+    {predictionError}
+  </div>
+)}
+{gateInfoError && (
+  <div className="bg-amber-50 border border-amber-200 text-amber-800 p-3 rounded-lg text-sm mb-3">
+    {gateInfoError}
+  </div>
+)}
+{notificationError && (
+  <div className="bg-amber-50 border border-amber-200 text-amber-800 p-3 rounded-lg text-sm mb-3">
+    {notificationError}
+  </div>
+)}
       <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
         <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
           <MapPin className="text-green-600" />
@@ -156,6 +223,27 @@ export default function FanView() {
               <h4 className="font-semibold text-green-900">AI Recommendation</h4>
               <p className="text-green-800 text-sm mt-1">{prediction.recommendation}</p>
             </div>
+            {gateInfo && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="bg-green-50 border border-green-200 p-4 rounded-xl flex items-start gap-3">
+                  <Leaf className="text-green-600 mt-0.5 shrink-0" />
+                  <div>
+                    <h4 className="font-semibold text-green-900 text-sm">Sustainability Tip</h4>
+                    <p className="text-green-800 text-sm mt-1">{gateInfo.sustainability_tip}</p>
+                  </div>
+                </div>
+                <div className="bg-blue-50 border border-blue-200 p-4 rounded-xl flex items-start gap-3">
+                  <Train className="text-blue-600 mt-0.5 shrink-0" />
+                  <div>
+                    <h4 className="font-semibold text-blue-900 text-sm">Transport Status</h4>
+                    <p className="text-blue-800 text-sm mt-1">{gateInfo.transport_status}</p>
+                  </div>
+                </div>
+              </div>
+            )}
+            {loadingInfo && (
+              <p className="text-sm text-gray-400 animate-pulse">Loading gate info...</p>
+            )}
           </div>
         </div>
       )}

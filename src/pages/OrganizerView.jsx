@@ -102,6 +102,16 @@ export default function OrganizerView() {
     }
     setLoadingAI(false);
   };
+  const broadcastNotification = async () => {
+    if (!selectedGate || !analysis) return;
+    const { error } = await supabase.from('notifications').insert([
+      { message: analysis.recommendation, gate_id: selectedGate.gate_id }
+    ]);
+    if (!error) {
+      setActionStatus("Broadcast sent to all fans!");
+      setTimeout(() => setActionStatus(null), 3000);
+    }
+  };
 
   return (
     <div className="p-6 max-w-6xl mx-auto space-y-6">
@@ -201,7 +211,14 @@ export default function OrganizerView() {
                 <Users size={16} />
                 Approve Recommendation & Deploy Field Volunteers
               </button>
+              <button
+              onClick={broadcastNotification}
+              className="w-full bg-amber-600 hover:bg-amber-700 text-white py-3 px-4 rounded-lg font-bold flex items-center justify-center gap-2 transition-colors text-sm mt-2"
+              >
+                Broadcast to Fans
+              </button>
             </div>
+            
           ) : (
             <p className="text-sm text-gray-500 text-center py-4">Click any card above to trigger real-time AI operational support diagnostics.</p>
           )}
