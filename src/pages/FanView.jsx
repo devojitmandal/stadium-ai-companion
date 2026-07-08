@@ -1,252 +1,373 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { askGemini } from '../lib/askGemini';
-import { Timer, Accessibility, Loader2, MapPin, ArrowRight, Leaf, Train } from 'lucide-react';
+import { buildQueuePredictionPrompt, buildGateInfoPrompt, buildRecapPrompt } from '../lib/prompts';
+import { Timer, Accessibility, Loader2, MapPin, ArrowRight, Leaf, Train, X, Sparkles } from 'lucide-react';
 
+// --- CONFIGURATION ---
+const NOTIFICATION_POLL_MS = 5000;
+const NOTIFICATION_LIMIT = 3;
+const WAIT_TIME_OPTIONS = [5, 10, 15, 30];
+
+// --- SHARED UI COMPONENTS ---
+function InlineNotice({ tone = 'amber', onDismiss, children }) {
+  const toneClasses = {
+    amber: 'bg-amber-500/10 border-amber-500/30 text-amber-400',
+    red: 'bg-red-500/10 border-red-500/30 text-red-400',
+    blue: 'bg-blue-500/10 border-blue-500/30 text-blue-400'
+  };
+
+  return (
+    <div className={`${toneClasses[tone]} backdrop-blur-md border p-4 rounded-xl text-sm flex items-start justify-between gap-3 animate-in fade-in slide-in-from-top-2 shadow-lg`}>
+      <div className="flex-1 mt-0.5 leading-relaxed">{children}</div>
+      {onDismiss && (
+        <button 
+          onClick={onDismiss} 
+          className="text-current opacity-60 hover:opacity-100 transition-opacity p-1 rounded-md hover:bg-white/10"
+          aria-label="Dismiss notification"
+        >
+          <X size={16} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+// --- MAIN COMPONENT ---
 export default function FanView() {
+  // 1. Core State
   const [gates, setGates] = useState([]);
   const [selectedGate, setSelectedGate] = useState('Gate 3');
   const [waitTime, setWaitTime] = useState(15);
   const [needsAccessibility, setNeedsAccessibility] = useState(false);
-  const [prediction, setPrediction] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [gateInfo, setGateInfo] = useState(null);
-const [loadingInfo, setLoadingInfo] = useState(false);
-const [predictionError, setPredictionError] = useState(null);
-const [gateInfoError, setGateInfoError] = useState(null);
 
-  // 1. Fetch live stadium data from Supabase
+  // 2. Feature States
+  const [prediction, setPrediction] = useState(null);
+  const [predictionError, setPredictionError] = useState(null);
+  const [loadingPrediction, setLoadingPrediction] = useState(false);
+
+  const [gateInfo, setGateInfo] = useState(null);
+  const [gateInfoError, setGateInfoError] = useState(null);
+  const [loadingGateInfo, setLoadingGateInfo] = useState(false);
+
+  const [sessionStats, setSessionStats] = useState({ predictions: 0, notificationsSeen: 0 });
+  const [recap, setRecap] = useState(null);
+  const [recapError, setRecapError] = useState(null);
+  const [loadingRecap, setLoadingRecap] = useState(false);
+
+  // 3. Notification State
+  const [notifications, setNotifications] = useState([]);
+  const [dismissedNotifs, setDismissedNotifs] = useState(new Set());
+
+  // Derived Target Gate
+  const targetGate = useMemo(
+    () => gates.find((g) => g.gate_id === selectedGate) ?? null,
+    [gates, selectedGate]
+  );
+
+  // --- API HOOKS ---
+  
+  // Fetch Stadium Data
   useEffect(() => {
+    let isMounted = true;
     const fetchGates = async () => {
-      const { data, error } = await supabase
-        .from('stadium_state')
-        .select('*')
-        .order('gate_id');
-      
-      if (data) setGates(data);
-      if (error) console.error("Supabase Error:", error);
+      const { data, error } = await supabase.from('stadium_state').select('*').order('gate_id');
+      if (!isMounted) return;
+      if (error) {
+        console.error('Failed to fetch stadium_state:', error);
+        return;
+      }
+      setGates(data ?? []);
     };
-    
     fetchGates();
+    return () => { isMounted = false; };
   }, []);
 
-  // 2. Generate Prediction via Gemini
-  const getPrediction = async () => {
-    setLoading(true);
-    const targetGate = gates.find(g => g.gate_id === selectedGate);
+  // Poll Notifications
+  useEffect(() => {
+    let isMounted = true;
+    const fetchNotifications = async () => {
+      const { data, error } = await supabase
+        .from('notifications')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(NOTIFICATION_LIMIT);
 
-    try {
-      const prompt = `
-        You are a stadium queue predictor. 
-        Current Gate: ${selectedGate}
-        Current Congestion: ${targetGate?.congestion_pct}%
-        Current Queue Time: ${targetGate?.queue_time_min} mins
-        Recent History: ${JSON.stringify(targetGate?.history || [])}
-        
-        The fan is deciding: leave their seat for food NOW, or wait ${waitTime} minutes.
-        Predict the expected queue time in both cases based on the congestion trend.
-        
-        ${needsAccessibility ? "IMPORTANT CONSTRAINT: This fan requires wheelchair-accessible routing. Avoid stairs and escalators, prioritize elevators and ramps, and explicitly mention estimated extra transit time if the accessible route is longer." : ""}
-        
-        Return strict JSON in this exact format: 
-        { 
-          "now_wait": [number], 
-          "later_wait": [number], 
-          "recommendation": "[1-2 sentence explanation]" 
-        }
-      `;
+      if (!isMounted) return;
+      if (error) {
+        console.error('Failed to fetch notifications:', error);
+        return;
+      }
+      setNotifications(data ?? []);
+      setSessionStats((prev) => ({ ...prev, notificationsSeen: data?.length ?? 0 }));
+    };
 
-      const result = await askGemini(prompt);
-      setPrediction(result);
-    } catch (error) {
-      console.error("AI Error:", error);
-      setPredictionError("Couldn't reach AI right now — try again.");
-    }
-    setLoading(false);
-  };
-  const getGateInfo = async () => {
-    setLoadingInfo(true);
-    const targetGate = gates.find(g => g.gate_id === selectedGate);
-  
+    fetchNotifications();
+    const interval = setInterval(fetchNotifications, NOTIFICATION_POLL_MS);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, []);
+
+  // Fetch contextual Gate Info when gate changes
+  const getGateInfo = useCallback(async () => {
+    if (!targetGate) return;
+    setLoadingGateInfo(true);
     try {
-      const prompt = `
-        You are a stadium fan assistant. Gate context: ${JSON.stringify(targetGate?.context || {})}
-  
-        Based on this, write:
-        1. A short, friendly sustainability tip (mention the nearest recycling point if available)
-        2. A short transportation status update (metro/parking) in plain language
-  
-        Return strict JSON:
-        { "sustainability_tip": "...", "transport_status": "..." }
-      `;
+      const prompt = buildGateInfoPrompt({ context: targetGate.context });
       const result = await askGemini(prompt);
       setGateInfo(result);
+      setGateInfoError(null);
     } catch (error) {
-      console.error("Gate info error:", error);
-      setGateInfoError("Couldn't load gate info — try again.");
+      console.error('Gate info error:', error);
+      setGateInfoError("Couldn't load gate context — try again.");
+    } finally {
+      setLoadingGateInfo(false);
     }
-    setLoadingInfo(false);
-  };
-  const [notifications, setNotifications] = useState([]);
-const [notificationError, setNotificationError] = useState(null);
+  }, [targetGate]);
 
-useEffect(() => {
-  const fetchNotifications = async () => {
-    const { data } = await supabase
-      .from('notifications')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(3);
-    if (data) setNotifications(data);
-  };
-  fetchNotifications();
-  const interval = setInterval(fetchNotifications, 5000);
-  return () => clearInterval(interval);
-}, []);
-useEffect(() => {
-  if (selectedGate && gates.length > 0) getGateInfo();
-}, [selectedGate, gates]);
+  useEffect(() => {
+    if (targetGate) getGateInfo();
+  }, [targetGate, getGateInfo]);
 
+  // --- ACTION HANDLERS ---
+  const handleDismissNotif = (id) => {
+    setDismissedNotifs((prev) => new Set(prev).add(id));
+  };
+
+  const getPrediction = async () => {
+    if (!targetGate) {
+      setPredictionError('No data available for this gate yet — try again shortly.');
+      return;
+    }
+    setLoadingPrediction(true);
+    try {
+      const prompt = buildQueuePredictionPrompt({ gateId: selectedGate, gate: targetGate, waitTime, needsAccessibility });
+      const result = await askGemini(prompt);
+      setPrediction(result);
+      setPredictionError(null);
+      setSessionStats((prev) => ({ ...prev, predictions: prev.predictions + 1 }));
+    } catch (error) {
+      console.error('Prediction error:', error);
+      setPredictionError("Couldn't reach AI right now — try again.");
+    } finally {
+      setLoadingPrediction(false);
+    }
+  };
+
+  const generateRecap = async () => {
+    setLoadingRecap(true);
+    try {
+      const prompt = buildRecapPrompt({ sessionStats, gateId: selectedGate, needsAccessibility });
+      const result = await askGemini(prompt);
+      setRecap(result);
+      setRecapError(null);
+    } catch (error) {
+      console.error('Recap error:', error);
+      setRecapError("Couldn't generate your recap — try again.");
+    } finally {
+      setLoadingRecap(false);
+    }
+  };
+
+  // Filter out dismissed notifications
+  const visibleNotifications = notifications.filter(n => !dismissedNotifs.has(n.id));
+
+  // --- RENDER ---
   return (
-    <div className="p-6 max-w-4xl mx-auto space-y-6">
-      {notifications.map((n) => (
-  <div key={n.id} className="bg-amber-50 border border-amber-300 text-amber-900 p-3 rounded-lg text-sm mb-3">
-    ⚠️ {n.message}
-  </div>
-))}
+    // Base wrapper with ambient meshes for the "vibe"
+    <div className="relative min-h-[calc(100vh-3.5rem)] bg-slate-950 overflow-hidden text-slate-200 selection:bg-blue-500/30">
+      <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] rounded-full bg-emerald-600/10 blur-[120px] pointer-events-none" />
+      <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] rounded-full bg-blue-600/10 blur-[120px] pointer-events-none" />
 
-{predictionError && (
-  <div className="bg-amber-50 border border-amber-200 text-amber-800 p-3 rounded-lg text-sm mb-3">
-    {predictionError}
-  </div>
-)}
-{gateInfoError && (
-  <div className="bg-amber-50 border border-amber-200 text-amber-800 p-3 rounded-lg text-sm mb-3">
-    {gateInfoError}
-  </div>
-)}
-{notificationError && (
-  <div className="bg-amber-50 border border-amber-200 text-amber-800 p-3 rounded-lg text-sm mb-3">
-    {notificationError}
-  </div>
-)}
-      <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
-        <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
-          <MapPin className="text-green-600" />
-          Smart Navigation & Queue Betting
-        </h2>
+      <div className="p-6 max-w-4xl mx-auto space-y-6 relative z-10">
+        
+        {/* Dynamic Broadcast Notifications */}
+        {visibleNotifications.map((n) => (
+          <InlineNotice key={n.id} tone="amber" onDismiss={() => handleDismissNotif(n.id)}>
+            <strong className="text-amber-300 font-bold tracking-wide uppercase text-xs mr-2 border border-amber-500/30 px-2 py-0.5 rounded bg-amber-500/10">Broadcast</strong>
+            {n.message}
+          </InlineNotice>
+        ))}
 
-        {/* Database Status check */}
-        {gates.length === 0 && <p className="text-sm text-gray-500 mb-4 animate-pulse">Connecting to stadium sensors...</p>}
+        {/* Global Errors */}
+        {predictionError && <InlineNotice tone="red">{predictionError}</InlineNotice>}
+        {gateInfoError && <InlineNotice tone="red">{gateInfoError}</InlineNotice>}
+        {recapError && <InlineNotice tone="red">{recapError}</InlineNotice>}
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Target Concession/Gate</label>
-              <select 
-                className="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-green-500"
-                value={selectedGate}
-                onChange={(e) => setSelectedGate(e.target.value)}
-              >
-                {gates.map(gate => (
-                  <option key={gate.gate_id} value={gate.gate_id}>
-                    {gate.gate_id} (Currently {gate.queue_time_min} min wait)
-                  </option>
-                ))}
-              </select>
+        {/* --- MAIN PREDICTION PANEL --- */}
+        <div className="bg-slate-900/40 backdrop-blur-xl p-6 md:p-8 rounded-3xl shadow-xl border border-slate-800">
+          <h2 className="text-2xl md:text-3xl font-bold mb-6 flex items-center gap-3 text-white tracking-tight">
+            <div className="p-2 bg-emerald-500/10 rounded-xl text-emerald-400">
+              <MapPin size={28} />
+            </div>
+            Smart Navigation
+          </h2>
+
+          {gates.length === 0 && (
+            <p className="text-sm text-slate-400 mb-4 flex items-center gap-2 animate-pulse">
+              <Loader2 size={16} className="animate-spin" /> Syncing with stadium telemetry...
+            </p>
+          )}
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+            <div className="space-y-5">
+              <div>
+                <label htmlFor="gate-select" className="block text-sm font-semibold text-slate-400 mb-2 uppercase tracking-wider">
+                  Target Concession/Gate
+                </label>
+                <select
+                  id="gate-select"
+                  className="w-full bg-slate-950/50 border border-slate-700/50 rounded-xl p-3.5 text-slate-100 focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500 outline-none transition-all appearance-none cursor-pointer"
+                  value={selectedGate}
+                  onChange={(e) => setSelectedGate(e.target.value)}
+                >
+                  {gates.map((gate) => (
+                    <option key={gate.gate_id} value={gate.gate_id} className="bg-slate-900">
+                      {gate.gate_id} (Wait: {gate.queue_time_min}m)
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label htmlFor="wait-select" className="block text-sm font-semibold text-slate-400 mb-2 uppercase tracking-wider">
+                  Time flexibility
+                </label>
+                <select
+                  id="wait-select"
+                  className="w-full bg-slate-950/50 border border-slate-700/50 rounded-xl p-3.5 text-slate-100 focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500 outline-none transition-all appearance-none cursor-pointer"
+                  value={waitTime}
+                  onChange={(e) => setWaitTime(Number(e.target.value))}
+                >
+                  {WAIT_TIME_OPTIONS.map((minutes) => (
+                    <option key={minutes} value={minutes} className="bg-slate-900">I can wait {minutes} minutes</option>
+                  ))}
+                </select>
+              </div>
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">I want to wait...</label>
-              <select 
-                className="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-green-500"
-                value={waitTime}
-                onChange={(e) => setWaitTime(Number(e.target.value))}
-              >
-                <option value={5}>5 minutes</option>
-                <option value={10}>10 minutes</option>
-                <option value={15}>15 minutes</option>
-                <option value={30}>30 minutes</option>
-              </select>
+            <div className="bg-slate-950/30 p-5 rounded-2xl border border-slate-800 flex flex-col justify-center">
+              <label className="flex items-center gap-4 cursor-pointer p-2 group">
+                <div className={`p-3 rounded-2xl transition-all duration-300 ${needsAccessibility ? 'bg-blue-500 text-white shadow-[0_0_20px_-5px_rgba(59,130,246,0.5)]' : 'bg-slate-800 text-slate-400 group-hover:bg-slate-700'}`}>
+                  <Accessibility size={24} />
+                </div>
+                <div className="flex-1">
+                  <p className={`font-bold text-lg transition-colors ${needsAccessibility ? 'text-white' : 'text-slate-300'}`}>Accessible Route</p>
+                  <p className="text-sm text-slate-500 mt-0.5">Prioritize elevators & step-free paths</p>
+                </div>
+                <div className={`w-12 h-6 rounded-full transition-colors relative flex items-center ${needsAccessibility ? 'bg-blue-500' : 'bg-slate-700'}`}>
+                  <div className={`w-5 h-5 bg-white rounded-full absolute transition-transform duration-300 ${needsAccessibility ? 'translate-x-6' : 'translate-x-1'}`} />
+                </div>
+                <input
+                  type="checkbox"
+                  className="sr-only"
+                  checked={needsAccessibility}
+                  onChange={(e) => setNeedsAccessibility(e.target.checked)}
+                />
+              </label>
             </div>
           </div>
 
-          <div className="bg-gray-50 p-4 rounded-lg border border-gray-200 flex flex-col justify-center">
-             {/* Accessibility Toggle - This knocks out Phase 5! */}
-            <label className="flex items-center gap-3 cursor-pointer p-2 hover:bg-gray-100 rounded-md transition-colors">
-              <div className={`p-2 rounded-full ${needsAccessibility ? 'bg-blue-100 text-blue-600' : 'bg-gray-200 text-gray-500'}`}>
-                <Accessibility size={20} />
+          <button
+            onClick={getPrediction}
+            disabled={loadingPrediction || gates.length === 0}
+            className="w-full bg-gradient-to-r from-emerald-500 to-green-600 hover:from-emerald-400 hover:to-green-500 text-white font-black text-lg py-4 px-6 rounded-xl flex items-center justify-center gap-3 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed shadow-[0_0_30px_-10px_rgba(16,185,129,0.4)] hover:shadow-[0_0_40px_-5px_rgba(16,185,129,0.6)] hover:-translate-y-0.5"
+          >
+            {loadingPrediction ? <Loader2 className="animate-spin" /> : 'Calculate Best Strategy'}
+          </button>
+        </div>
+
+        {/* --- PREDICTION RESULTS --- */}
+        {prediction && (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 animate-in fade-in slide-in-from-bottom-8 duration-700">
+            <div className="bg-slate-900/60 backdrop-blur-md p-6 rounded-3xl border border-slate-800 text-center flex flex-col justify-center shadow-lg">
+              <p className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-2">Depart Now</p>
+              <p className="text-5xl font-black text-white tracking-tighter">
+                {prediction.now_wait} <span className="text-xl font-medium text-slate-500 tracking-normal">min</span>
+              </p>
+            </div>
+
+            <div className="flex items-center justify-center py-2 md:py-0">
+              <ArrowRight className="text-slate-700 hidden md:block" size={40} strokeWidth={1} />
+              <ArrowRight className="text-slate-700 md:hidden rotate-90" size={32} strokeWidth={1} />
+            </div>
+
+            <div className="bg-slate-900/60 backdrop-blur-md p-6 rounded-3xl border border-slate-800 text-center flex flex-col justify-center shadow-lg">
+              <p className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-2">Wait {waitTime}m</p>
+              <p className="text-5xl font-black text-white tracking-tighter">
+                {prediction.later_wait} <span className="text-xl font-medium text-slate-500 tracking-normal">min</span>
+              </p>
+            </div>
+
+            <div className="md:col-span-3 bg-emerald-500/10 border border-emerald-500/20 p-6 rounded-3xl flex items-start gap-4 shadow-[inset_0_0_30px_rgba(16,185,129,0.05)]">
+              <div className="p-3 bg-emerald-500/20 rounded-xl shrink-0">
+                <Timer className="text-emerald-400" size={24} />
+              </div>
+              <div className="mt-1">
+                <h4 className="font-bold text-emerald-400 text-lg tracking-tight">AI Strategy Recommendation</h4>
+                <p className="text-emerald-50/80 text-base mt-2 leading-relaxed font-medium">{prediction.recommendation}</p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* --- CONTEXTUAL GATE INFO --- */}
+        {loadingGateInfo && <p className="text-sm text-slate-500 animate-pulse text-center">Analyzing environmental sensors...</p>}
+        {gateInfo && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 animate-in fade-in duration-500">
+            <div className="bg-slate-900/40 backdrop-blur-sm border border-slate-800/80 hover:border-emerald-500/30 transition-colors p-5 rounded-2xl flex items-start gap-4">
+              <div className="p-2.5 bg-emerald-500/10 rounded-lg shrink-0 text-emerald-400">
+                <Leaf size={20} />
               </div>
               <div>
-                <p className="font-medium text-gray-900">Accessibility Mode</p>
-                <p className="text-xs text-gray-500">Prioritize elevators & step-free routes</p>
+                <h4 className="font-bold text-slate-200 text-sm tracking-wide">Green Ops Status</h4>
+                <p className="text-slate-400 text-sm mt-1.5 leading-relaxed">{gateInfo.sustainability_tip}</p>
               </div>
-              <input 
-                type="checkbox" 
-                className="ml-auto w-5 h-5 accent-blue-600"
-                checked={needsAccessibility}
-                onChange={(e) => setNeedsAccessibility(e.target.checked)}
-              />
-            </label>
-          </div>
-        </div>
-
-        <button 
-          onClick={getPrediction}
-          disabled={loading || gates.length === 0}
-          className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-4 rounded-lg flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
-        >
-          {loading ? <Loader2 className="animate-spin" /> : "Predict Best Time to Go"}
-        </button>
-      </div>
-
-      {/* Results UI */}
-      {prediction && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 animate-in fade-in slide-in-from-bottom-4 duration-500">
-          <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-200 text-center flex flex-col justify-center">
-            <p className="text-sm text-gray-500 mb-1">If you go NOW</p>
-            <p className="text-3xl font-bold text-gray-900">{prediction.now_wait} <span className="text-lg font-normal text-gray-500">mins</span></p>
-          </div>
-          
-          <div className="flex items-center justify-center">
-             <ArrowRight className="text-gray-300 hidden md:block" size={32} />
-          </div>
-
-          <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-200 text-center flex flex-col justify-center">
-            <p className="text-sm text-gray-500 mb-1">If you wait {waitTime} mins</p>
-            <p className="text-3xl font-bold text-gray-900">{prediction.later_wait} <span className="text-lg font-normal text-gray-500">mins</span></p>
-          </div>
-
-          <div className="md:col-span-3 bg-green-50 border border-green-200 p-4 rounded-xl flex items-start gap-3 mt-2">
-            <Timer className="text-green-600 mt-0.5 shrink-0" />
-            <div>
-              <h4 className="font-semibold text-green-900">AI Recommendation</h4>
-              <p className="text-green-800 text-sm mt-1">{prediction.recommendation}</p>
             </div>
-            {gateInfo && (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="bg-green-50 border border-green-200 p-4 rounded-xl flex items-start gap-3">
-                  <Leaf className="text-green-600 mt-0.5 shrink-0" />
-                  <div>
-                    <h4 className="font-semibold text-green-900 text-sm">Sustainability Tip</h4>
-                    <p className="text-green-800 text-sm mt-1">{gateInfo.sustainability_tip}</p>
-                  </div>
-                </div>
-                <div className="bg-blue-50 border border-blue-200 p-4 rounded-xl flex items-start gap-3">
-                  <Train className="text-blue-600 mt-0.5 shrink-0" />
-                  <div>
-                    <h4 className="font-semibold text-blue-900 text-sm">Transport Status</h4>
-                    <p className="text-blue-800 text-sm mt-1">{gateInfo.transport_status}</p>
-                  </div>
-                </div>
+            <div className="bg-slate-900/40 backdrop-blur-sm border border-slate-800/80 hover:border-blue-500/30 transition-colors p-5 rounded-2xl flex items-start gap-4">
+              <div className="p-2.5 bg-blue-500/10 rounded-lg shrink-0 text-blue-400">
+                <Train size={20} />
               </div>
-            )}
-            {loadingInfo && (
-              <p className="text-sm text-gray-400 animate-pulse">Loading gate info...</p>
-            )}
+              <div>
+                <h4 className="font-bold text-slate-200 text-sm tracking-wide">Transit Telemetry</h4>
+                <p className="text-slate-400 text-sm mt-1.5 leading-relaxed">{gateInfo.transport_status}</p>
+              </div>
+            </div>
           </div>
+        )}
+
+        {/* --- MATCHDAY RECAP --- */}
+        <div className="bg-slate-900/40 backdrop-blur-xl p-6 md:p-8 rounded-3xl shadow-xl border border-slate-800 relative overflow-hidden group">
+          <div className="absolute top-0 right-0 w-64 h-64 bg-purple-600/10 blur-[80px] rounded-full group-hover:bg-purple-600/20 transition-colors duration-700" />
+          
+          <h3 className="text-xl font-bold mb-5 flex items-center gap-3 text-white relative z-10">
+            <Sparkles className="text-purple-400" />
+            Matchday Recap
+          </h3>
+          
+          <button
+            onClick={generateRecap}
+            disabled={loadingRecap}
+            className="w-full relative z-10 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-bold py-4 px-6 rounded-xl flex items-center justify-center gap-3 transition-colors disabled:opacity-50 shadow-sm"
+          >
+            {loadingRecap ? <Loader2 className="animate-spin" /> : 'Generate My Digital Passport'}
+          </button>
+
+          {recap && (
+            <div className="mt-6 bg-purple-500/10 border border-purple-500/20 p-6 rounded-2xl space-y-4 relative z-10 animate-in slide-in-from-bottom-4 fade-in duration-500">
+              <p className="text-purple-100/90 text-sm md:text-base leading-relaxed">{recap.recap_text}</p>
+              <div className="inline-flex bg-purple-500/20 border border-purple-500/30 px-3 py-1.5 rounded-lg">
+                <p className="text-purple-300 text-xs font-bold uppercase tracking-wider">
+                  <span className="text-purple-400 mr-2">✦</span> {recap.fun_stat}
+                </p>
+              </div>
+            </div>
+          )}
         </div>
-      )}
+
+      </div>
     </div>
   );
 }

@@ -1,104 +1,121 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import FanView from './FanView';
+import { askGemini } from '../lib/askGemini';
 
-vi.mock('../lib/supabase', () => ({
-  supabase: {
-    from: (table) => {
-      if (table === 'stadium_state') {
-        return {
-          select: () => ({
-            order: () => Promise.resolve({
-              data: [{ gate_id: 'Gate 3', queue_time_min: 12, congestion_pct: 40, context: {}, history: [] }],
-              error: null,
-            }),
-          }),
-        };
-      }
-      // notifications table
-      return {
-        select: () => ({
-          order: () => ({
-            limit: () => Promise.resolve({ data: [], error: null }),
-          }),
-        }),
-      };
-    },
-  },
-}));
+// --- MOCKS ---
+
+// Note: vi.mock factories are hoisted. We dynamically import a shared mock 
+// factory to ensure the mock data lives inside the factory itself.
+vi.mock('../lib/supabase', async () => {
+  const { createSupabaseMock } = await import('../test/mocks/supabase');
+  return {
+    supabase: createSupabaseMock({
+      stadium_state: {
+        data: [{
+          gate_id: 'Gate 3',
+          queue_time_min: 12,
+          congestion_pct: 40,
+          context: {},
+          history: [],
+        }],
+        error: null,
+      },
+      notifications: { data: [], error: null },
+    }),
+  };
+});
 
 vi.mock('../lib/askGemini', () => ({
   askGemini: vi.fn(),
 }));
 
-import { askGemini } from '../lib/askGemini';
+// --- UTILITIES ---
 
-describe('FanView', () => {
+/**
+ * FanView fires an AI call automatically on mount (for sustainability info). 
+ * Tests that care about user-triggered calls need to wait for that mount-time 
+ * call to settle first, then clear the mock history.
+ */
+async function renderAndSettleMount() {
+  render(<FanView />);
+  await waitFor(() => expect(askGemini).toHaveBeenCalled());
+  askGemini.mockClear();
+}
+
+// --- TEST SUITE ---
+describe('FanView Component', () => {
+  
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
-  it('renders the navigation heading', async () => {
+  it('renders the core navigation heading on mount', async () => {
+    // Act
     render(<FanView />);
-    expect(screen.getByText(/Smart Navigation & Queue Betting/i)).toBeInTheDocument();
+    
+    // Assert - Changed to match the new UI text
+    expect(await screen.findByText(/Smart Navigation/i)).toBeInTheDocument();
   });
 
-  it('shows the predict button', async () => {
+  it('renders the prediction trigger button', async () => {
+    // Act
     render(<FanView />);
-    expect(screen.getByRole('button', { name: /Predict Best Time to Go/i })).toBeInTheDocument();
+    
+    // Assert
+    expect(await screen.findByRole('button', { name: /Calculate Best Strategy/i })).toBeInTheDocument();
   });
 
-  it('calls askGemini when Predict is clicked', async () => {
+  it('triggers a single AI call when the prediction button is clicked', async () => {
+    // Arrange
     askGemini.mockResolvedValue({ now_wait: 10, later_wait: 15, recommendation: 'Go now.' });
-    render(<FanView />);
+    await renderAndSettleMount();
 
-    // let the mount-time getGateInfo call settle first
-    await waitFor(() => expect(askGemini).toHaveBeenCalled());
-    askGemini.mockClear();
-
-    fireEvent.click(await screen.findByRole('button', { name: /Predict Best Time to Go/i }));
+    // Act
+    fireEvent.click(screen.getByRole('button', { name: /Calculate Best Strategy/i }));
+    
+    // Assert
     await waitFor(() => expect(askGemini).toHaveBeenCalledTimes(1));
   });
 
-  it('displays the AI recommendation after prediction', async () => {
+  it('displays the parsed AI recommendation after a successful API return', async () => {
+    // Arrange
     askGemini.mockResolvedValue({ now_wait: 10, later_wait: 15, recommendation: 'Go now.' });
-    render(<FanView />);
+    await renderAndSettleMount();
 
-    await waitFor(() => expect(askGemini).toHaveBeenCalled());
-    askGemini.mockClear();
-    askGemini.mockResolvedValue({ now_wait: 10, later_wait: 15, recommendation: 'Go now.' });
+    // Act
+    fireEvent.click(screen.getByRole('button', { name: /Calculate Best Strategy/i }));
 
-    fireEvent.click(await screen.findByRole('button', { name: /Predict Best Time to Go/i }));
-
+    // Assert
     expect(await screen.findByText('Go now.')).toBeInTheDocument();
   });
 
-  it('includes accessibility constraint in the prompt when toggle is checked', async () => {
+  it('injects specific accessibility constraints into the AI prompt when the mode is enabled', async () => {
+    // Arrange
     askGemini.mockResolvedValue({ now_wait: 10, later_wait: 15, recommendation: 'ok' });
-    render(<FanView />);
+    await renderAndSettleMount();
 
-    await waitFor(() => expect(askGemini).toHaveBeenCalled());
-    askGemini.mockClear();
+    // Act
+    // Note: The FanView code changed the aria-label to match the new UI, 
+    // so we target the checkbox via its role directly.
+    fireEvent.click(screen.getByRole('checkbox'));
+    fireEvent.click(screen.getByRole('button', { name: /Calculate Best Strategy/i }));
 
-    const checkbox = await screen.findByRole('checkbox');
-    fireEvent.click(checkbox);
-    fireEvent.click(screen.getByRole('button', { name: /Predict Best Time to Go/i }));
-
+    // Assert
     await waitFor(() => expect(askGemini).toHaveBeenCalledTimes(1));
-    const promptSent = askGemini.mock.calls[0][0];
+    const [promptSent] = askGemini.mock.calls[0];
     expect(promptSent).toMatch(/wheelchair-accessible routing/i);
   });
 
-  it('shows an inline error message if askGemini fails (no browser alert)', async () => {
-    askGemini.mockResolvedValueOnce({ sustainability_tip: 'x', transport_status: 'y' });
-    render(<FanView />);
+  it('displays a graceful inline error message if the Gemini API call fails', async () => {
+    // Arrange
+    await renderAndSettleMount();
+    askGemini.mockRejectedValue(new Error('Network fail'));
 
-    await waitFor(() => expect(askGemini).toHaveBeenCalled());
-    askGemini.mockClear();
-    askGemini.mockRejectedValue(new Error('network fail'));
+    // Act
+    fireEvent.click(screen.getByRole('button', { name: /Calculate Best Strategy/i }));
 
-    fireEvent.click(await screen.findByRole('button', { name: /Predict Best Time to Go/i }));
-
+    // Assert (Verifying no alert dialogs pop up)
     expect(await screen.findByText(/Couldn't reach AI right now/i)).toBeInTheDocument();
   });
 });
