@@ -51,5 +51,26 @@ To demonstrate the platform's capabilities without access to a physical stadium'
 
 1. **Clone the repository:**
    ```bash
+   Install dependencies:
+
+Bash
+npm install
+Environment Configuration:
+Create a .env file in the root directory and add your Supabase keys:
+
+Code snippet
+VITE_SUPABASE_URL=your_supabase_project_url
+VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
+(Note: The Gemini API key is securely stored in the Supabase Edge Function environment, keeping the frontend completely secure).
+
+Run the Development Server:
+
+Bash
+npm run dev
+🚦 Running Tests
+This project includes a robust, automated test suite to validate UI rendering and AI prompt injection logic.
+
+Bash
+npm test
    git clone <your-repo-url>
    cd stadium-ai-companion
