@@ -2,51 +2,27 @@ import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { askGemini } from '../lib/askGemini';
 import { buildSpikeAnalysisPrompt } from '../lib/prompts';
+import { TABLES, INCIDENT_STATUS, CONGESTION_THRESHOLDS } from '../lib/constants';
+import InlineNotice from '../components/InlineNotice';
 import { LayoutDashboard, TrendingUp, ShieldAlert, Loader2, Users, Info, Sparkles } from 'lucide-react';
 
-// --- CONFIGURATION CONSTANTS ---
-const POLL_MS = 5000;
-const CRITICAL_CONGESTION_PCT = 75;
-const WARNING_CONGESTION_PCT = 40;
 const ACTION_STATUS_TIMEOUT_MS = 3000;
 const EVALUATOR_NOTICE_TIMEOUT_MS = 5000;
-
-// --- SHARED COMPONENTS ---
-function InlineNotice({ tone = 'amber', children }) {
-  const toneClasses = {
-    amber: 'bg-amber-500/10 border-amber-500/30 text-amber-400',
-    red: 'bg-red-500/10 border-red-500/30 text-red-400',
-    purple: 'bg-purple-500/10 border-purple-500/30 text-purple-400'
-  };
-
-  return (
-    <div className={`${toneClasses[tone]} backdrop-blur-md border p-4 rounded-xl text-sm flex items-start justify-between gap-3 animate-in fade-in shadow-lg`}>
-      <div className="flex-1 mt-0.5 leading-relaxed font-medium">{children}</div>
-    </div>
-  );
-}
+const DEMO_SURGE_GATE_ID = 'Gate 3';
 
 export default function OrganizerView() {
-  // --- STATE MANAGEMENT ---
-  
   const [gates, setGates] = useState([]);
   const [selectedGate, setSelectedGate] = useState(null);
   const [analysis, setAnalysis] = useState(null);
-  
+
   const [loadingAI, setLoadingAI] = useState(false);
-  
   const [analysisError, setAnalysisError] = useState(null);
   const [actionStatus, setActionStatus] = useState(null);
   const [actionError, setActionError] = useState(null);
   const [evaluatorNotice, setEvaluatorNotice] = useState(null);
 
-  // --- API CALLS & EFFECTS ---
   const fetchStadiumState = useCallback(async () => {
-    const { data, error } = await supabase
-      .from('stadium_state')
-      .select('*')
-      .order('gate_id');
-      
+    const { data, error } = await supabase.from(TABLES.STADIUM_STATE).select('*').order('gate_id');
     if (error) {
       console.error('Failed to fetch stadium_state:', error);
       return;
@@ -54,13 +30,19 @@ export default function OrganizerView() {
     setGates(data ?? []);
   }, []);
 
+  // Live sensor grid: load once, then subscribe to changes instead of
+  // polling on an interval. Only refetches when a row actually changes,
+  // instead of hitting the database on a fixed timer regardless of activity.
   useEffect(() => {
     fetchStadiumState();
-    const interval = setInterval(fetchStadiumState, POLL_MS);
-    return () => clearInterval(interval);
+    const channel = supabase
+      .channel('organizer-stadium-state')
+      .on('postgres_changes', { event: '*', schema: 'public', table: TABLES.STADIUM_STATE }, fetchStadiumState)
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
   }, [fetchStadiumState]);
 
-  // --- UTILITY HANDLERS ---
   const showActionStatus = (message) => {
     setActionStatus(message);
     setTimeout(() => setActionStatus(null), ACTION_STATUS_TIMEOUT_MS);
@@ -76,11 +58,10 @@ export default function OrganizerView() {
     setTimeout(() => setEvaluatorNotice(null), EVALUATOR_NOTICE_TIMEOUT_MS);
   };
 
-  // --- CORE FEATURES ---
   const triggerDemoSpike = async () => {
     setActionStatus('Simulating crowd surge...');
     const { error } = await supabase
-      .from('stadium_state')
+      .from(TABLES.STADIUM_STATE)
       .update({
         congestion_pct: 94,
         queue_time_min: 35,
@@ -90,7 +71,7 @@ export default function OrganizerView() {
           weather: 'Humid / Peak Flow',
         },
       })
-      .eq('gate_id', 'Gate 3');
+      .eq('gate_id', DEMO_SURGE_GATE_ID);
 
     if (error) {
       console.error('Failed to trigger demo spike:', error);
@@ -98,6 +79,9 @@ export default function OrganizerView() {
       return;
     }
 
+    // The realtime subscription will also pick this up, but fetching
+    // immediately avoids waiting on subscription round-trip latency for
+    // what's meant to be an instant demo action.
     await fetchStadiumState();
     showActionStatus('Surge injected into Gate 3!');
   };
@@ -123,11 +107,11 @@ export default function OrganizerView() {
   const deployVolunteers = async () => {
     if (!selectedGate || !analysis) return;
 
-    const { error } = await supabase.from('incidents').insert([
+    const { error } = await supabase.from(TABLES.INCIDENTS).insert([
       {
         type: 'Crowd Control Deployment',
         location: `${selectedGate.gate_id} Concourse`,
-        status: 'open',
+        status: INCIDENT_STATUS.OPEN,
       },
     ]);
 
@@ -136,7 +120,7 @@ export default function OrganizerView() {
       showActionError('Could not dispatch volunteers — try again.');
       return;
     }
-    
+
     showActionStatus('Dispatch alert broadcasted to Volunteer mobile views!');
     triggerEvaluatorNotice("Evaluator Check: Open the 'Volunteer' page now to see this deployment alert sync in real-time via Supabase!");
   };
@@ -144,7 +128,7 @@ export default function OrganizerView() {
   const broadcastNotification = async () => {
     if (!selectedGate || !analysis) return;
 
-    const { error } = await supabase.from('notifications').insert([
+    const { error } = await supabase.from(TABLES.NOTIFICATIONS).insert([
       { message: analysis.recommendation, gate_id: selectedGate.gate_id },
     ]);
 
@@ -153,22 +137,18 @@ export default function OrganizerView() {
       showActionError('Could not broadcast to fans — try again.');
       return;
     }
-    
+
     showActionStatus('Broadcast sent to all fans!');
     triggerEvaluatorNotice("Evaluator Check: Open the 'Fan View' page now to see this live broadcast altering the fan experience!");
   };
 
-  // --- RENDER ---
   return (
     <div className="relative min-h-[calc(100vh-3.5rem)] bg-slate-950 overflow-hidden text-slate-200">
-      
-      {/* Ambient Background Meshes */}
       <div className="absolute top-[-10%] right-[-10%] w-[40%] h-[40%] rounded-full bg-purple-600/10 blur-[120px] pointer-events-none" />
       <div className="absolute bottom-[-10%] left-[-10%] w-[40%] h-[40%] rounded-full bg-indigo-600/10 blur-[120px] pointer-events-none" />
 
       <div className="p-6 max-w-6xl mx-auto space-y-6 relative z-10">
-        
-        {/* Floating Evaluator Toast */}
+
         {evaluatorNotice && (
           <div className="fixed bottom-8 right-8 bg-blue-600/90 backdrop-blur-lg text-white p-5 rounded-2xl shadow-[0_0_40px_-10px_rgba(37,99,235,0.5)] border border-blue-400 max-w-sm animate-in slide-in-from-bottom-6 fade-in duration-500 z-50">
             <div className="flex items-start gap-3">
@@ -181,7 +161,6 @@ export default function OrganizerView() {
           </div>
         )}
 
-        {/* Header & Controls */}
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center bg-slate-900/40 backdrop-blur-xl p-6 rounded-3xl shadow-xl border border-slate-800 gap-4">
           <div>
             <h2 className="text-2xl md:text-3xl font-bold flex items-center gap-3 text-white tracking-tight">
@@ -202,15 +181,13 @@ export default function OrganizerView() {
           </button>
         </div>
 
-        {/* Global Feedback Notices */}
         {actionStatus && <InlineNotice tone="purple">{actionStatus}</InlineNotice>}
         {actionError && <InlineNotice tone="red">{actionError}</InlineNotice>}
 
-        {/* Live Sensor Grid */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
           {gates.map((gate) => {
-            const isCritical = gate.congestion_pct >= CRITICAL_CONGESTION_PCT;
-            const isWarning = gate.congestion_pct > WARNING_CONGESTION_PCT;
+            const isCritical = gate.congestion_pct >= CONGESTION_THRESHOLDS.CRITICAL_PCT;
+            const isWarning = gate.congestion_pct > CONGESTION_THRESHOLDS.WARNING_PCT;
 
             return (
               <div
@@ -226,8 +203,8 @@ export default function OrganizerView() {
                   }
                 }}
                 className={`p-5 rounded-2xl bg-slate-900/60 backdrop-blur-md border cursor-pointer transition-all duration-300 focus:outline-none focus:ring-2 focus:ring-purple-500/50 hover:-translate-y-1 ${
-                  isCritical 
-                    ? 'border-red-500/50 shadow-[0_0_20px_-5px_rgba(239,68,68,0.2)] bg-red-500/5 hover:border-red-400' 
+                  isCritical
+                    ? 'border-red-500/50 shadow-[0_0_20px_-5px_rgba(239,68,68,0.2)] bg-red-500/5 hover:border-red-400'
                     : isWarning
                     ? 'border-amber-500/30 bg-amber-500/5 hover:border-amber-500/50'
                     : 'border-slate-800 hover:border-purple-500/40 hover:shadow-[0_0_20px_-5px_rgba(168,85,247,0.15)]'
@@ -261,7 +238,6 @@ export default function OrganizerView() {
           })}
         </div>
 
-        {/* GenAI Deep Dive Panel */}
         {selectedGate && (
           <div className="bg-slate-900/40 backdrop-blur-xl rounded-3xl shadow-xl border border-slate-800 p-6 md:p-8 space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
             <div className="flex justify-between items-center border-b border-slate-800 pb-4">
@@ -273,12 +249,12 @@ export default function OrganizerView() {
               </h3>
               <span
                 className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider border ${
-                  selectedGate.congestion_pct >= CRITICAL_CONGESTION_PCT 
-                    ? 'bg-red-500/10 text-red-400 border-red-500/20' 
+                  selectedGate.congestion_pct >= CONGESTION_THRESHOLDS.CRITICAL_PCT
+                    ? 'bg-red-500/10 text-red-400 border-red-500/20'
                     : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
                 }`}
               >
-                {selectedGate.congestion_pct >= CRITICAL_CONGESTION_PCT ? 'Critical Surge' : 'Nominal Flow'}
+                {selectedGate.congestion_pct >= CONGESTION_THRESHOLDS.CRITICAL_PCT ? 'Critical Surge' : 'Nominal Flow'}
               </span>
             </div>
 

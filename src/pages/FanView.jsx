@@ -2,46 +2,20 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { askGemini } from '../lib/askGemini';
 import { buildQueuePredictionPrompt, buildGateInfoPrompt, buildRecapPrompt } from '../lib/prompts';
-import { Timer, Accessibility, Loader2, MapPin, ArrowRight, Leaf, Train, X, Sparkles } from 'lucide-react';
+import { TABLES, NOTIFICATION_DISPLAY_LIMIT } from '../lib/constants';
+import InlineNotice from '../components/InlineNotice';
+import { Timer, Accessibility, Loader2, MapPin, ArrowRight, Leaf, Train, Sparkles } from 'lucide-react';
 
-// --- CONFIGURATION ---
-const NOTIFICATION_POLL_MS = 5000;
-const NOTIFICATION_LIMIT = 3;
 const WAIT_TIME_OPTIONS = [5, 10, 15, 30];
 
-// --- SHARED UI COMPONENTS ---
-function InlineNotice({ tone = 'amber', onDismiss, children }) {
-  const toneClasses = {
-    amber: 'bg-amber-500/10 border-amber-500/30 text-amber-400',
-    red: 'bg-red-500/10 border-red-500/30 text-red-400',
-    blue: 'bg-blue-500/10 border-blue-500/30 text-blue-400'
-  };
-
-  return (
-    <div className={`${toneClasses[tone]} backdrop-blur-md border p-4 rounded-xl text-sm flex items-start justify-between gap-3 animate-in fade-in slide-in-from-top-2 shadow-lg`}>
-      <div className="flex-1 mt-0.5 leading-relaxed">{children}</div>
-      {onDismiss && (
-        <button 
-          onClick={onDismiss} 
-          className="text-current opacity-60 hover:opacity-100 transition-opacity p-1 rounded-md hover:bg-white/10"
-          aria-label="Dismiss notification"
-        >
-          <X size={16} />
-        </button>
-      )}
-    </div>
-  );
-}
-
-// --- MAIN COMPONENT ---
 export default function FanView() {
-  // 1. Core State
+  // 1. Core state
   const [gates, setGates] = useState([]);
   const [selectedGate, setSelectedGate] = useState('Gate 3');
   const [waitTime, setWaitTime] = useState(15);
   const [needsAccessibility, setNeedsAccessibility] = useState(false);
 
-  // 2. Feature States
+  // 2. Feature state
   const [prediction, setPrediction] = useState(null);
   const [predictionError, setPredictionError] = useState(null);
   const [loadingPrediction, setLoadingPrediction] = useState(false);
@@ -55,62 +29,77 @@ export default function FanView() {
   const [recapError, setRecapError] = useState(null);
   const [loadingRecap, setLoadingRecap] = useState(false);
 
-  // 3. Notification State
+  // 3. Notification state
   const [notifications, setNotifications] = useState([]);
   const [dismissedNotifs, setDismissedNotifs] = useState(new Set());
 
-  // Derived Target Gate
   const targetGate = useMemo(
     () => gates.find((g) => g.gate_id === selectedGate) ?? null,
     [gates, selectedGate]
   );
 
-  // --- API HOOKS ---
-  
-  // Fetch Stadium Data
+  // --- DATA FETCHERS (reused by both the initial load and the realtime callback) ---
+
+  const fetchGates = useCallback(async () => {
+    const { data, error } = await supabase.from(TABLES.STADIUM_STATE).select('*').order('gate_id');
+    if (error) {
+      console.error('Failed to fetch stadium_state:', error);
+      return;
+    }
+    setGates(data ?? []);
+  }, []);
+
+  const fetchNotifications = useCallback(async () => {
+    const { data, error } = await supabase
+      .from(TABLES.NOTIFICATIONS)
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(NOTIFICATION_DISPLAY_LIMIT);
+
+    if (error) {
+      console.error('Failed to fetch notifications:', error);
+      return;
+    }
+    setNotifications(data ?? []);
+    setSessionStats((prev) => ({ ...prev, notificationsSeen: data?.length ?? 0 }));
+  }, []);
+
+  // Live gate telemetry: load once, then subscribe to changes instead of
+  // polling on an interval. Realtime only pushes an update when a row
+  // actually changes, which avoids the constant background requests a
+  // fixed-interval poll makes even when nothing is happening.
   useEffect(() => {
-    let isMounted = true;
-    const fetchGates = async () => {
-      const { data, error } = await supabase.from('stadium_state').select('*').order('gate_id');
-      if (!isMounted) return;
-      if (error) {
-        console.error('Failed to fetch stadium_state:', error);
-        return;
-      }
-      setGates(data ?? []);
-    };
     fetchGates();
-    return () => { isMounted = false; };
-  }, []);
+    const channel = supabase
+      .channel('fan-stadium-state')
+      .on('postgres_changes', { event: '*', schema: 'public', table: TABLES.STADIUM_STATE }, fetchGates)
+      .subscribe();
 
-  // Poll Notifications
+    return () => { supabase.removeChannel(channel); };
+  }, [fetchGates]);
+
+  // Live organizer broadcasts: same subscribe-instead-of-poll pattern.
   useEffect(() => {
-    let isMounted = true;
-    const fetchNotifications = async () => {
-      const { data, error } = await supabase
-        .from('notifications')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(NOTIFICATION_LIMIT);
-
-      if (!isMounted) return;
-      if (error) {
-        console.error('Failed to fetch notifications:', error);
-        return;
-      }
-      setNotifications(data ?? []);
-      setSessionStats((prev) => ({ ...prev, notificationsSeen: data?.length ?? 0 }));
-    };
-
     fetchNotifications();
-    const interval = setInterval(fetchNotifications, NOTIFICATION_POLL_MS);
-    return () => {
-      isMounted = false;
-      clearInterval(interval);
-    };
-  }, []);
+    const channel = supabase
+      .channel('fan-notifications')
+      .on('postgres_changes', { event: '*', schema: 'public', table: TABLES.NOTIFICATIONS }, fetchNotifications)
+      .subscribe();
 
-  // Fetch contextual Gate Info when gate changes
+    return () => { supabase.removeChannel(channel); };
+  }, [fetchNotifications]);
+
+  // Keep dismissedNotifs from growing forever across a long session — once
+  // a notification is no longer in the live feed, there's nothing left to
+  // "un-dismiss", so its id can be dropped.
+  useEffect(() => {
+    setDismissedNotifs((prev) => {
+      const stillPresent = new Set(notifications.map((n) => n.id));
+      const next = new Set([...prev].filter((id) => stillPresent.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [notifications]);
+
   const getGateInfo = useCallback(async () => {
     if (!targetGate) return;
     setLoadingGateInfo(true);
@@ -132,6 +121,7 @@ export default function FanView() {
   }, [targetGate, getGateInfo]);
 
   // --- ACTION HANDLERS ---
+
   const handleDismissNotif = (id) => {
     setDismissedNotifs((prev) => new Set(prev).add(id));
   };
@@ -171,32 +161,32 @@ export default function FanView() {
     }
   };
 
-  // Filter out dismissed notifications
-  const visibleNotifications = notifications.filter(n => !dismissedNotifs.has(n.id));
+  const visibleNotifications = useMemo(
+    () => notifications.filter((n) => !dismissedNotifs.has(n.id)),
+    [notifications, dismissedNotifs]
+  );
 
   // --- RENDER ---
   return (
-    // Base wrapper with ambient meshes for the "vibe"
     <div className="relative min-h-[calc(100vh-3.5rem)] bg-slate-950 overflow-hidden text-slate-200 selection:bg-blue-500/30">
       <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] rounded-full bg-emerald-600/10 blur-[120px] pointer-events-none" />
       <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] rounded-full bg-blue-600/10 blur-[120px] pointer-events-none" />
 
       <div className="p-6 max-w-4xl mx-auto space-y-6 relative z-10">
-        
-        {/* Dynamic Broadcast Notifications */}
+
         {visibleNotifications.map((n) => (
           <InlineNotice key={n.id} tone="amber" onDismiss={() => handleDismissNotif(n.id)}>
-            <strong className="text-amber-300 font-bold tracking-wide uppercase text-xs mr-2 border border-amber-500/30 px-2 py-0.5 rounded bg-amber-500/10">Broadcast</strong>
+            <strong className="text-amber-300 font-bold tracking-wide uppercase text-xs mr-2 border border-amber-500/30 px-2 py-0.5 rounded bg-amber-500/10">
+              Broadcast
+            </strong>
             {n.message}
           </InlineNotice>
         ))}
 
-        {/* Global Errors */}
         {predictionError && <InlineNotice tone="red">{predictionError}</InlineNotice>}
         {gateInfoError && <InlineNotice tone="red">{gateInfoError}</InlineNotice>}
         {recapError && <InlineNotice tone="red">{recapError}</InlineNotice>}
 
-        {/* --- MAIN PREDICTION PANEL --- */}
         <div className="bg-slate-900/40 backdrop-blur-xl p-6 md:p-8 rounded-3xl shadow-xl border border-slate-800">
           <h2 className="text-2xl md:text-3xl font-bold mb-6 flex items-center gap-3 text-white tracking-tight">
             <div className="p-2 bg-emerald-500/10 rounded-xl text-emerald-400">
@@ -262,6 +252,7 @@ export default function FanView() {
                 </div>
                 <input
                   type="checkbox"
+                  aria-label="Enable accessibility mode"
                   className="sr-only"
                   checked={needsAccessibility}
                   onChange={(e) => setNeedsAccessibility(e.target.checked)}
@@ -279,7 +270,6 @@ export default function FanView() {
           </button>
         </div>
 
-        {/* --- PREDICTION RESULTS --- */}
         {prediction && (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 animate-in fade-in slide-in-from-bottom-8 duration-700">
             <div className="bg-slate-900/60 backdrop-blur-md p-6 rounded-3xl border border-slate-800 text-center flex flex-col justify-center shadow-lg">
@@ -313,7 +303,6 @@ export default function FanView() {
           </div>
         )}
 
-        {/* --- CONTEXTUAL GATE INFO --- */}
         {loadingGateInfo && <p className="text-sm text-slate-500 animate-pulse text-center">Analyzing environmental sensors...</p>}
         {gateInfo && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 animate-in fade-in duration-500">
@@ -338,15 +327,14 @@ export default function FanView() {
           </div>
         )}
 
-        {/* --- MATCHDAY RECAP --- */}
         <div className="bg-slate-900/40 backdrop-blur-xl p-6 md:p-8 rounded-3xl shadow-xl border border-slate-800 relative overflow-hidden group">
           <div className="absolute top-0 right-0 w-64 h-64 bg-purple-600/10 blur-[80px] rounded-full group-hover:bg-purple-600/20 transition-colors duration-700" />
-          
+
           <h3 className="text-xl font-bold mb-5 flex items-center gap-3 text-white relative z-10">
             <Sparkles className="text-purple-400" />
             Matchday Recap
           </h3>
-          
+
           <button
             onClick={generateRecap}
             disabled={loadingRecap}

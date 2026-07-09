@@ -62,7 +62,7 @@ function PortalCard({ to, icon: Icon, accent, title, description }) {
       aria-label={`Enter ${title} portal`}
       className={`group relative flex flex-col items-center text-center p-8 rounded-3xl 
                  bg-slate-900/40 backdrop-blur-xl border border-slate-800 
-                 transition-all duration-500 ease-out hover:-translate-y-2
+                 transition-all duration-500 ease-out hover:-translate-y-2 motion-reduce:hover:translate-y-0
                  ${styles.hoverBorder} ${styles.hoverGlow} overflow-hidden`}
     >
       {/* Ambient internal card glow on hover */}
@@ -97,7 +97,7 @@ export default function Landing() {
       <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] rounded-full bg-blue-600/20 blur-[120px] pointer-events-none" />
       <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] rounded-full bg-purple-600/20 blur-[120px] pointer-events-none" />
       
-      <div className="relative z-10 text-center mb-16 max-w-3xl animate-in fade-in slide-in-from-bottom-8 duration-1000">
+      <div className="relative z-10 text-center mb-16 max-w-3xl animate-in fade-in slide-in-from-bottom-8 duration-1000 motion-reduce:animate-none">
         
         {/* Sleek, glowing badge */}
         <div className="inline-flex items-center gap-2 bg-slate-900/80 backdrop-blur-md border border-slate-700/50 rounded-full px-5 py-2 mb-8 shadow-[0_0_20px_-5px_rgba(245,158,11,0.2)]">
@@ -119,7 +119,7 @@ export default function Landing() {
       </div>
 
       {/* Grid wrapper with stagger-ready layout */}
-      <div className="relative z-10 grid grid-cols-1 md:grid-cols-3 gap-6 lg:gap-8 w-full max-w-6xl animate-in fade-in slide-in-from-bottom-12 duration-1000 delay-150">
+      <div className="relative z-10 grid grid-cols-1 md:grid-cols-3 gap-6 lg:gap-8 w-full max-w-6xl animate-in fade-in slide-in-from-bottom-12 duration-1000 delay-150 motion-reduce:animate-none">
         {PORTALS.map((portal) => (
           <PortalCard key={portal.to} {...portal} />
         ))}

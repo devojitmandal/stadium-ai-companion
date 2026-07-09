@@ -4,7 +4,8 @@
 // they can be unit-tested directly (no rendering, no mocking React) and
 // reused if other views ever need similar prompts.
 
-/** * Shared safety instructions injected into every prompt to guarantee 
+/**
+ * Shared safety instructions injected into every prompt to guarantee
  * the LLM returns raw JSON that won't crash JSON.parse().
  */
 const STRICT_JSON_RULES = `
@@ -99,6 +100,29 @@ export function buildSpikeAnalysisPrompt({ gate, allGates }) {
 
     Return strict JSON in this exact format:
     { "explanation": "...", "recommendation": "..." }
+
+    ${STRICT_JSON_RULES}
+  `.trim();
+}
+
+/**
+ * Builds the prompt for the Volunteer View instant phrasebook generator.
+ */
+export function buildPhrasebookPrompt({ language, situation }) {
+  return `
+    You are helping a stadium volunteer communicate with a fan who speaks ${language}.
+    Situation: ${situation}.
+    Generate 5 short phrases the volunteer can read aloud or show on screen:
+    - Original English phrase
+    - ${language} translation
+    - Phonetic pronunciation guide
+    Also include 1 short, respectful cultural tip for interacting with people from this culture.
+
+    Return strict JSON in this exact format:
+    {
+      "phrases": [ {"english": "...", "translated": "...", "phonetic": "..."} ],
+      "cultural_tip": "..."
+    }
 
     ${STRICT_JSON_RULES}
   `.trim();

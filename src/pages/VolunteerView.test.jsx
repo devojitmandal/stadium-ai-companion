@@ -3,69 +3,53 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import VolunteerView from './VolunteerView';
 import { askGemini } from '../lib/askGemini';
 
-// --- MOCKS ---
+// vi.mock factories are hoisted above all other top-level code, so the
+// shared mock factory is imported dynamically inside the factory itself.
+// Using the shared factory (instead of a hand-rolled inline mock) means
+// this automatically gets .channel()/.removeChannel() support, which
+// VolunteerView now needs for its Realtime incidents subscription.
+vi.mock('../lib/supabase', async () => {
+  const { createSupabaseMock } = await import('../test/mocks/supabase');
+  return {
+    supabase: createSupabaseMock({
+      incidents: { data: [], error: null },
+    }),
+  };
+});
+
 vi.mock('../lib/askGemini', () => ({
   askGemini: vi.fn(),
 }));
 
-vi.mock('../lib/supabase', () => ({
-  supabase: {
-    from: () => ({
-      select: () => ({
-        eq: () => ({
-          order: () => Promise.resolve({ data: [], error: null }),
-        }),
-      }),
-      update: () => ({ 
-        eq: () => Promise.resolve({ error: null }) 
-      }),
-    }),
-  },
-}));
-
-// --- TEST SUITE ---
-describe('VolunteerView Component', () => {
-  
+describe('VolunteerView', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
-  it('renders the initial phrasebook heading successfully', async () => {
-    // Act
+  it('renders the phrasebook heading', async () => {
     render(<VolunteerView />);
-    
-    // Assert - Changed to match the new UI text
     expect(await screen.findByText(/Instant Phrasebook/i)).toBeInTheDocument();
   });
 
-  it('displays generated AI phrases and cultural tips after form submission', async () => {
-    // Arrange: Mock a successful Gemini API response
+  it('displays generated phrases and cultural tip after a successful generation', async () => {
     askGemini.mockResolvedValue({
       phrases: [{ english: 'Hello', translated: 'Hola', phonetic: 'OH-lah' }],
       cultural_tip: 'Be warm and direct.',
     });
 
     render(<VolunteerView />);
+    fireEvent.click(await screen.findByRole('button', { name: /Generate Translation Cards/i }));
 
-    // Act: Trigger the generation
-    fireEvent.click(screen.getByRole('button', { name: /Generate Translation Cards/i }));
-
-    // Assert: Verify the mocked data renders on screen
     expect(await screen.findByText('Hola')).toBeInTheDocument();
     expect(await screen.findByText('Be warm and direct.')).toBeInTheDocument();
   });
 
-  it('displays an inline error message when the AI generation fails', async () => {
-    // Arrange: Mock an API failure
-    askGemini.mockRejectedValue(new Error('API Failure'));
-    
+  it('shows an inline error message if generation fails (never a browser alert)', async () => {
+    askGemini.mockRejectedValue(new Error('API failure'));
+
     render(<VolunteerView />);
+    fireEvent.click(await screen.findByRole('button', { name: /Generate Translation Cards/i }));
 
-    // Act: Trigger the generation
-    fireEvent.click(screen.getByRole('button', { name: /Generate Translation Cards/i }));
-
-    // Assert: Verify the fallback UI notice appears
     expect(await screen.findByText(/Couldn't reach AI/i)).toBeInTheDocument();
   });
-  
 });
